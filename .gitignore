@@ -1,0 +1,15 @@
+# Токены и секреты
+.env
+
+# Виртуальное окружение
+venv/
+env/
+
+# Python кэш
+__pycache__/
+*.pyc
+*.pyo
+*.bash
+*.sh
+*.pyd
+.Python
