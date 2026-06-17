@@ -1,65 +1,72 @@
 import hashlib
-from aiogram import Router, F
-from aiogram.types import (
-    Message,
-    InlineQuery,
-    InlineQueryResultArticle,
-    InputTextMessageContent,
-)
+import aiohttp
+from aiogram import Router, F, Bot
+from aiogram.types import Message, InlineQuery
 from aiogram.filters import CommandStart
 from utils import format_latex
 
 router = Router()
 
-
 @router.message(CommandStart())
 async def cmd_start(message: Message):
-    await message.answer(
-        "Привет! Я рендерю нативный LaTeX в Telegram.\n\n"
+# ... existing code ...
         "Пиши мне формулы напрямую или используй инлайн: `@твой_бот \int x dx`.\n"
-        "Если хочешь смешать текст (Markdown) и математику, оборачивай формулы в `$$...$$`."
+        "Если хочешь смешать текст и математику, оборачивай формулы в `$$...$$`."
     )
 
-
 @router.message(F.text)
-async def handle_private_message(message: Message):
+async def handle_private_message(message: Message, bot: Bot):
     formatted_text = format_latex(message.text)
-    try:
-        # Пытаемся отправить с MarkdownV2 (чтобы работал жирный шрифт, курсив и т.д.)
-        await message.answer(formatted_text, parse_mode="MarkdownV2")
-    except Exception:
-        # MarkdownV2 очень строг к экранированию спецсимволов вне блоков кода (например, знаков +, -, .).
-        # Если юзер ошибся в Markdown, мы фолбечимся: оборачиваем вообще всё в math, чтобы не было ошибки.
-        fallback_text = f"```math\n{message.text}\n```"
-        try:
-            await message.answer(fallback_text, parse_mode="MarkdownV2")
-        except Exception:
-            await message.answer(
-                "Произошла ошибка при рендере. Проверь синтаксис формулы."
-            )
-
+    
+    # Используем новый метод sendRichMessage (Bot API 10.1+) для нативного рендера математики
+    url = f"https://api.telegram.org/bot{bot.token}/sendRichMessage"
+    payload = {
+        "chat_id": message.chat.id,
+        "rich_message": {
+            "markdown": formatted_text
+        }
+    }
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.post(url, json=payload) as resp:
+            data = await resp.json()
+            if not data.get("ok"):
+                # Фолбэк, если синтаксис формулы неверен или клиент не поддерживает
+                fallback_text = f"```math\n{message.text}\n```"
+                await message.answer(fallback_text, parse_mode="MarkdownV2")
 
 @router.inline_query()
-async def handle_inline_query(inline_query: InlineQuery):
+async def handle_inline_query(inline_query: InlineQuery, bot: Bot):
     query_text = inline_query.query.strip()
-
+    
     if not query_text:
         await inline_query.answer([])
         return
 
     formatted_text = format_latex(query_text)
-
-    # Генерируем уникальный ID для результата на основе запроса
     result_id = hashlib.md5(query_text.encode()).hexdigest()
 
-    # Строго один вариант выбора
-    result = InlineQueryResultArticle(
-        id=result_id,
-        title="Отправить LaTeX",
-        description=query_text[:50] + ("..." if len(query_text) > 50 else ""),
-        input_message_content=InputTextMessageContent(
-            message_text=formatted_text, parse_mode="MarkdownV2"
-        ),
-    )
-
-    await inline_query.answer([result], cache_time=1, is_personal=True)
+    # Для инлайн запроса используем сырой HTTP-запрос, чтобы избежать проблем с типами aiogram 
+    # и передать новый InputRichMessageContent (Bot API 10.1+)
+    url = f"https://api.telegram.org/bot{bot.token}/answerInlineQuery"
+    payload = {
+        "inline_query_id": inline_query.id,
+        "results": [
+            {
+                "type": "article",
+                "id": result_id,
+                "title": "Отправить LaTeX",
+                "description": query_text[:50] + ("..." if len(query_text) > 50 else ""),
+                "input_message_content": {
+                    "rich_message": {
+                        "markdown": formatted_text
+                    }
+                }
+            }
+        ],
+        "cache_time": 1,
+        "is_personal": True
+    }
+    
+    async with aiohttp.ClientSession() as session:
+        await session.post(url, json=payload)
