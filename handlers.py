@@ -1,64 +1,103 @@
+import aiohttp
 import hashlib
 from aiogram import Router, F
-from aiogram.types import (
-    Message,
-    InlineQuery,
-    InlineQueryResultArticle,
-    InputTextMessageContent,
-)
+from aiogram.types import Message, InlineQuery
 from aiogram.filters import CommandStart
-from utils import format_latex
+from config import BOT_TOKEN
 
 router = Router()
 
 
+def format_math(text: str) -> str:
+    text = text.strip()
+    # Если юзер не обернул формулу в доллары сам, делаем это за него (по умолчанию блочная)
+    if "$$" not in text and "\\[" not in text and "$" not in text and "\\(" not in text:
+        return f"$${text}$$"
+    return text
+
+
 @router.message(CommandStart())
 async def cmd_start(message: Message):
-    await message.answer(
-        "Привет! Я рендерю нативный LaTeX в Telegram.\n\n"
-        "Просто отправь мне формулу (например, <code>\\int x dx</code>).\n"
-        "Я поддерживаю смешивание текста и математики (оборачивай формулы в <code>$$...$$</code>), "
-        "а также Markdown: **жирный** или __курсив__.\n\n"
-        "Ещё я работаю в инлайн-режиме в любом чате: <code>@твой_бот \\mathbb{R}</code>",
-        parse_mode="HTML",
-    )
+    # Прямой вызов новейшего API Telegram 10.1 (Rich Messages)
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendRichMessage"
+    payload = {
+        "chat_id": message.chat.id,
+        "rich_message": {
+            "markdown": "Привет! Я рендерю **нативный LaTeX** в Telegram.\n\nПросто отправь мне формулу (например, `\\int x dx`).\nЯ поддерживаю Markdown и математику: `$$...$$`.\nЕщё я работаю в инлайн-режиме: `@твой_бот \\mathbb{R}`"
+        },
+    }
+    async with aiohttp.ClientSession() as session:
+        await session.post(url, json=payload)
 
 
 @router.message(F.text)
 async def handle_private_message(message: Message):
-    formatted_text = format_latex(message.text)
-    try:
-        # Отправляем в HTML режиме (он не ломает LaTeX слэши!)
-        await message.answer(formatted_text, parse_mode="HTML")
-    except Exception as e:
-        # Безотказный фоллбэк: если что-то пошло не так, кидаем сырой текст.
-        # Математика всё равно отрендерится клиентом!
-        print(f"Ошибка парсинга HTML: {e}")
-        await message.answer(message.text)
+    formatted = format_math(message.text)
+
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/sendRichMessage"
+    payload = {
+        "chat_id": message.chat.id,
+        "rich_message": {
+            # В режиме rich_message Telegram сам парсит $$ и превращает их в красивые формулы
+            "markdown": formatted
+        },
+    }
+
+    async with aiohttp.ClientSession() as session:
+        resp = await session.post(url, json=payload)
+        data = await resp.json()
+
+        # Если случилась ошибка API (например, кривой Markdown), отправляем как есть
+        if not data.get("ok"):
+            await message.answer(f"Ошибка рендера. Сырой текст:\n{formatted}")
 
 
 @router.inline_query()
 async def handle_inline_query(inline_query: InlineQuery):
     query_text = inline_query.query.strip()
-
     if not query_text:
-        await inline_query.answer([])
         return
 
-    formatted_text = format_latex(query_text)
-
-    # Генерируем уникальный ID для результата на основе запроса
+    formatted = format_math(query_text)
     result_id = hashlib.md5(query_text.encode()).hexdigest()
 
-    # По ТЗ: строго один вариант выбора, который точно всегда работает
-    result = InlineQueryResultArticle(
-        id=result_id,
-        title="Отправить LaTeX",
-        description=query_text[:50] + ("..." if len(query_text) > 50 else ""),
-        input_message_content=InputTextMessageContent(
-            message_text=formatted_text, parse_mode="HTML"
-        ),
-    )
+    url = f"https://api.telegram.org/bot{BOT_TOKEN}/answerInlineQuery"
 
-    await inline_query.answer([result], cache_time=1, is_personal=True)
+    # Используем InputRichMessageContent для инлайна
+    payload = {
+        "inline_query_id": inline_query.id,
+        "results": [
+            {
+                "type": "article",
+                "id": result_id,
+                "title": "Отправить красивый LaTeX",
+                "description": query_text[:50],
+                "input_message_content": {"rich_message": {"markdown": formatted}},
+            }
+        ],
+        "cache_time": 1,
+        "is_personal": True,
+    }
+
+    async with aiohttp.ClientSession() as session:
+        resp = await session.post(url, json=payload)
+        data = await resp.json()
+
+        # Fallback: если инлайн еще не поддерживает Rich Messages на серверах ТГ
+        if not data.get("ok"):
+            fallback_payload = {
+                "inline_query_id": inline_query.id,
+                "results": [
+                    {
+                        "type": "article",
+                        "id": result_id,
+                        "title": "Отправить LaTeX (классический режим)",
+                        "description": query_text[:50],
+                        "input_message_content": {"message_text": formatted},
+                    }
+                ],
+                "cache_time": 1,
+                "is_personal": True,
+            }
+            await session.post(url, json=fallback_payload)
 
