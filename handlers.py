@@ -1,72 +1,64 @@
 import hashlib
-import aiohttp
-from aiogram import Router, F, Bot
-from aiogram.types import Message, InlineQuery
+from aiogram import Router, F
+from aiogram.types import (
+    Message,
+    InlineQuery,
+    InlineQueryResultArticle,
+    InputTextMessageContent,
+)
 from aiogram.filters import CommandStart
 from utils import format_latex
 
 router = Router()
 
+
 @router.message(CommandStart())
 async def cmd_start(message: Message):
-# ... existing code ...
-        "Пиши мне формулы напрямую или используй инлайн: `@твой_бот \int x dx`.\n"
-        "Если хочешь смешать текст и математику, оборачивай формулы в `$$...$$`."
+    await message.answer(
+        "Привет! Я рендерю нативный LaTeX в Telegram.\n\n"
+        "Просто отправь мне формулу (например, <code>\\int x dx</code>).\n"
+        "Я поддерживаю смешивание текста и математики (оборачивай формулы в <code>$$...$$</code>), "
+        "а также Markdown: **жирный** или __курсив__.\n\n"
+        "Ещё я работаю в инлайн-режиме в любом чате: <code>@твой_бот \\mathbb{R}</code>",
+        parse_mode="HTML",
     )
 
+
 @router.message(F.text)
-async def handle_private_message(message: Message, bot: Bot):
+async def handle_private_message(message: Message):
     formatted_text = format_latex(message.text)
-    
-    # Используем новый метод sendRichMessage (Bot API 10.1+) для нативного рендера математики
-    url = f"https://api.telegram.org/bot{bot.token}/sendRichMessage"
-    payload = {
-        "chat_id": message.chat.id,
-        "rich_message": {
-            "markdown": formatted_text
-        }
-    }
-    
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, json=payload) as resp:
-            data = await resp.json()
-            if not data.get("ok"):
-                # Фолбэк, если синтаксис формулы неверен или клиент не поддерживает
-                fallback_text = f"```math\n{message.text}\n```"
-                await message.answer(fallback_text, parse_mode="MarkdownV2")
+    try:
+        # Отправляем в HTML режиме (он не ломает LaTeX слэши!)
+        await message.answer(formatted_text, parse_mode="HTML")
+    except Exception as e:
+        # Безотказный фоллбэк: если что-то пошло не так, кидаем сырой текст.
+        # Математика всё равно отрендерится клиентом!
+        print(f"Ошибка парсинга HTML: {e}")
+        await message.answer(message.text)
+
 
 @router.inline_query()
-async def handle_inline_query(inline_query: InlineQuery, bot: Bot):
+async def handle_inline_query(inline_query: InlineQuery):
     query_text = inline_query.query.strip()
-    
+
     if not query_text:
         await inline_query.answer([])
         return
 
     formatted_text = format_latex(query_text)
+
+    # Генерируем уникальный ID для результата на основе запроса
     result_id = hashlib.md5(query_text.encode()).hexdigest()
 
-    # Для инлайн запроса используем сырой HTTP-запрос, чтобы избежать проблем с типами aiogram 
-    # и передать новый InputRichMessageContent (Bot API 10.1+)
-    url = f"https://api.telegram.org/bot{bot.token}/answerInlineQuery"
-    payload = {
-        "inline_query_id": inline_query.id,
-        "results": [
-            {
-                "type": "article",
-                "id": result_id,
-                "title": "Отправить LaTeX",
-                "description": query_text[:50] + ("..." if len(query_text) > 50 else ""),
-                "input_message_content": {
-                    "rich_message": {
-                        "markdown": formatted_text
-                    }
-                }
-            }
-        ],
-        "cache_time": 1,
-        "is_personal": True
-    }
-    
-    async with aiohttp.ClientSession() as session:
-        await session.post(url, json=payload)
+    # По ТЗ: строго один вариант выбора, который точно всегда работает
+    result = InlineQueryResultArticle(
+        id=result_id,
+        title="Отправить LaTeX",
+        description=query_text[:50] + ("..." if len(query_text) > 50 else ""),
+        input_message_content=InputTextMessageContent(
+            message_text=formatted_text, parse_mode="HTML"
+        ),
+    )
+
+    await inline_query.answer([result], cache_time=1, is_personal=True)
+
